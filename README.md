@@ -198,6 +198,42 @@ a renderer actually running.
 catches a test asserting on a string that only exists in a component — green
 with a renderer up, red without one.
 
+## A real connection, for a stream and an upgrade
+
+`Send` drives `httptest.NewRecorder`, which is the right thing for almost
+every test and cannot represent two kinds of request:
+
+- **A stream.** `Send` returns when the handler returns, so an endpoint that
+  holds its response open never returns at all. The test hangs until the
+  binary times out rather than failing.
+- **An upgrade.** A recorder does not implement `http.Hijacker`, so a
+  WebSocket handshake fails on the hijack rather than on anything the test
+  meant to exercise.
+
+```go
+server := a.Server()           // a real listener over the same handler
+client := a.Client()           // shares the App's cookie jar
+
+request, _ := http.NewRequest("GET", server.URL+"/broadcast/sse?channel=…", nil)
+request.Header.Set(apptest.ActingAsHeader, "42")
+response, err := client.Do(request)
+```
+
+`Server` is idempotent — a helper may ask for it without coordinating with
+the test that already did — and it closes when the test ends.
+
+**The shared cookie jar is the point, not a convenience.** An `EventSource`
+and a browser `WebSocket` cannot set an `Authorization` header, so a cookie is
+the only mechanism those endpoints have in production. The jar is mapped onto
+the App's base URL, because a `httptest.Server` listens on a port the kernel
+chose and cookies stored while driving the handler directly would otherwise
+not be offered to it. One application in one test is one cookie identity
+however the bytes reached it, so a sign-in through the request builder
+authenticates a stream opened afterwards.
+
+`Client` does not follow redirects: a stream endpoint answering 302 is a
+failure the test should see.
+
 ## Escape hatches
 
 ```go
