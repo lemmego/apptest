@@ -23,7 +23,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/lemmego/api/app"
@@ -53,6 +55,8 @@ type App struct {
 	inertiaVersionKnown  bool
 	skipCSRF             bool
 	strictSSR            bool
+	serverOnce           sync.Once        // guards server, so Server is callable more than once
+	server               *httptest.Server // non-nil once Server has been called
 	scratch              *scratchDB // non-nil when WithPostgres created a database
 	cachePrefix          string     // the namespace this App's cache entries live under
 }
