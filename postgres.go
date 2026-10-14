@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -236,12 +237,61 @@ func dsnForDatabase(dsn, name string) string {
 	return strings.Join(pairs, " ")
 }
 
+// parseDSN reads a Postgres DSN in either of the two forms lib/pq accepts and
+// returns it as keyword settings.
+//
+// Only the keyword form was handled, and a URL was not rejected — it was
+// mangled. strings.Fields on "postgres://you@host:5432/db?sslmode=disable"
+// yields one field, Cut on "=" splits it at the query parameter, and the
+// result was a settings map keyed on the whole URL up to "sslmode". The error
+// that came back named the symptom and not the cause:
+//
+//	pq: unsupported sslmode "disable dbname=apptest_20a89edc8248"
+//
+// URL form is what anybody writes in CI, and what every other tool in this
+// repo accepts, so it is supported rather than diagnosed.
 func parseDSN(dsn string) map[string]string {
+	if parsed, err := url.Parse(dsn); err == nil &&
+		(parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
+		return urlDSNSettings(parsed)
+	}
+
 	parts := map[string]string{}
 	for _, field := range strings.Fields(dsn) {
 		key, value, found := strings.Cut(field, "=")
 		if found {
 			parts[key] = value
+		}
+	}
+	return parts
+}
+
+// urlDSNSettings flattens a postgres:// URL into keyword settings.
+func urlDSNSettings(parsed *url.URL) map[string]string {
+	parts := map[string]string{}
+	if host := parsed.Hostname(); host != "" {
+		parts["host"] = host
+	}
+	if port := parsed.Port(); port != "" {
+		parts["port"] = port
+	}
+	if parsed.User != nil {
+		if user := parsed.User.Username(); user != "" {
+			parts["user"] = user
+		}
+		if password, ok := parsed.User.Password(); ok {
+			parts["password"] = password
+		}
+	}
+	if name := strings.TrimPrefix(parsed.Path, "/"); name != "" {
+		parts["dbname"] = name
+	}
+	// Query parameters last, so sslmode and the rest survive. Only the first
+	// value of each: lib/pq takes one, and a DSN repeating a parameter is a
+	// mistake rather than a list.
+	for key, values := range parsed.Query() {
+		if len(values) > 0 && values[0] != "" {
+			parts[key] = values[0]
 		}
 	}
 	return parts
