@@ -178,6 +178,30 @@ most of what is worth testing at this layer.
 row afterwards. It is cancelled when the test ends, so a query left running by
 a failed assertion does not outlive it.
 
+### Interrupting the run drops the database too
+
+Ctrl-C out of a suite and `t.Cleanup` never runs — a signal terminates the
+process, which is [golang/go#41891](https://github.com/golang/go/issues/41891)
+and not something a test can register its way out of. So the first test to
+create a scratch database also installs a SIGINT and SIGTERM handler that
+drops whatever is live, writes what it dropped to stderr, and then re-raises
+the signal so the exit status is the conventional one.
+
+The handler restores the default signal disposition *before* it starts
+dropping, so a second Ctrl-C kills the process immediately. That ordering is
+the point: a leaked database costs a few megabytes, where a cleanup holding
+the only handler while it waits on a database server nobody can reach is a
+test run that cannot be stopped.
+
+It is installed on first use rather than in an `init()`, so a harness used
+without `WithPostgres` never touches the process's signal disposition.
+
+**SIGKILL and a `-timeout` expiry still leak**, and are worth knowing about
+rather than being surprised by: there is no handler for the first, and on the
+second the testing package panics the process itself, sending no signal and
+running no cleanups. A leftover database is always named `apptest_` followed
+by twelve hex digits, and dropping one is `DROP DATABASE "apptest_…"`.
+
 ## SSR is lenient by default, and that default is the interesting part
 
 ```go

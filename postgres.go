@@ -68,24 +68,11 @@ func (a *App) setUpPostgres(o *options) {
 		a.t.Skipf("apptest: set %s to run tests that need a database", PostgresDSNEnv)
 	}
 
-	name := scratchName()
-
-	admin, err := sql.Open("postgres", adminDSN)
+	scratch, err := createScratch(adminDSN)
 	if err != nil {
-		a.t.Fatalf("apptest: opening %s: %v", PostgresDSNEnv, err)
+		a.t.Fatalf("apptest: %v", err)
 	}
-	defer admin.Close()
-	if err := admin.Ping(); err != nil {
-		a.t.Fatalf("apptest: %s is set but unreachable: %v", PostgresDSNEnv, err)
-	}
-
-	// The identifier is generated here, not supplied, so interpolating it is
-	// safe — CREATE DATABASE takes no parameters anyway.
-	if _, err := admin.Exec(`CREATE DATABASE "` + name + `"`); err != nil {
-		a.t.Fatalf("apptest: creating database %s: %v", name, err)
-	}
-
-	a.scratch = &scratchDB{adminDSN: adminDSN, name: name}
+	a.scratch = scratch
 
 	// Register the drop the instant the database exists, before anything that
 	// can fail. Everything below — pointing the config at it, running
@@ -93,13 +80,44 @@ func (a *App) setUpPostgres(o *options) {
 	// so a cleanup registered after this point would never be reached. A
 	// failing migration would then leave a database behind on every run, and
 	// the developer fixing the migration accumulates one per attempt.
+	//
+	// createScratch has already registered it for the interrupt handler,
+	// which is the half t.Cleanup cannot do.
 	a.t.Cleanup(a.tearDownPostgres)
 
-	pointConfigAt(a.t, o.config, adminDSN, name)
+	pointConfigAt(a.t, o.config, adminDSN, scratch.name)
 
 	if o.migrate {
-		a.runMigrations(dsnForDatabase(adminDSN, name))
+		a.runMigrations(dsnForDatabase(adminDSN, scratch.name))
 	}
+}
+
+// createScratch creates a uniquely named database and records it, so that an
+// interrupt can drop it even though t.Cleanup will not run.
+//
+// Registration happens here rather than at the call site because it must
+// happen in the same breath as the CREATE: a database that exists and is not
+// registered is one nothing will ever remove.
+func createScratch(adminDSN string) (*scratchDB, error) {
+	admin, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", PostgresDSNEnv, err)
+	}
+	defer admin.Close()
+	if err := admin.Ping(); err != nil {
+		return nil, fmt.Errorf("%s is set but unreachable: %w", PostgresDSNEnv, err)
+	}
+
+	name := scratchName()
+	// The identifier is generated here, not supplied, so interpolating it is
+	// safe — CREATE DATABASE takes no parameters anyway.
+	if _, err := admin.Exec(`CREATE DATABASE "` + name + `"`); err != nil {
+		return nil, fmt.Errorf("creating database %s: %w", name, err)
+	}
+
+	scratch := &scratchDB{adminDSN: adminDSN, name: name}
+	registerScratch(scratch)
+	return scratch, nil
 }
 
 func (a *App) runMigrations(dsn string) {
@@ -138,16 +156,11 @@ func (a *App) tearDownPostgres() {
 	if a.scratch == nil {
 		return
 	}
-	admin, err := sql.Open("postgres", a.scratch.adminDSN)
-	if err != nil {
-		a.t.Logf("apptest: could not reopen %s to drop %s: %v", PostgresDSNEnv, a.scratch.name, err)
-		return
-	}
-	defer admin.Close()
-	// FORCE terminates connections the application left open; without it a
-	// pool that has not finished closing keeps the database alive and every
-	// subsequent run leaks another one.
-	if _, err := admin.Exec(`DROP DATABASE IF EXISTS "` + a.scratch.name + `" WITH (FORCE)`); err != nil {
+	// Forget it first. A failed drop is reported and left behind either way,
+	// and the interrupt handler retrying a drop that has already failed once
+	// would only delay the exit it is running inside.
+	unregisterScratch(a.scratch)
+	if err := dropScratch(a.scratch); err != nil {
 		a.t.Logf("apptest: dropping %s: %v — drop it by hand", a.scratch.name, err)
 	}
 	a.scratch = nil
