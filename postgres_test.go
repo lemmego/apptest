@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/lemmego/api/config"
@@ -128,8 +129,15 @@ func TestWithScratchDBCreatesAndMigratesAScratchDatabase(t *testing.T) {
 // each other's rows and start depending on order.
 func TestWithScratchDBIsolatesEachApp(t *testing.T) {
 	skipWithoutPostgres(t)
-	first := New(t, WithConfig(postgresConfig()), WithScratchDBNoMigrate())
-	second := New(t, WithConfig(postgresConfig()), WithScratchDBNoMigrate())
+	// One configuration passed to both, which is what a real harness does:
+	// it hands over config.GetAll(), the application's own singleton. Two
+	// fresh maps would not reproduce this, because then the second app never
+	// sees what the first wrote — and that is exactly why apptest's own
+	// suite was green while the consuming one failed on every test but the
+	// first.
+	cfg := postgresConfig()
+	first := New(t, WithConfig(cfg), WithScratchDBNoMigrate())
+	second := New(t, WithConfig(cfg), WithScratchDBNoMigrate())
 
 	if first.scratch.name == second.scratch.name {
 		t.Fatalf("both apps got %q", first.scratch.name)
@@ -255,7 +263,9 @@ func databaseExists(t *testing.T, adminDSN, name string) bool {
 // which is the exact error this whole change exists to stop producing.
 func testAdminDSN(t *testing.T) string {
 	t.Helper()
-	return adminDSNFromConfig(t, postgresConfig())
+	// buildAdminDSN, not adminDSNFromConfig: the latter resolves once per
+	// process on purpose, and these tests feed it different configurations.
+	return buildAdminDSN(t, postgresConfig())
 }
 
 // The connection block's options reach the scratch database.
@@ -271,7 +281,7 @@ func TestTheConnectionsOptionsSurviveIntoTheScratchDSN(t *testing.T) {
 	conn := cfg["sql"].(config.M)["connections"].(config.M)["postgres"].(config.M)
 	conn["options"] = config.M{"sslmode": "disable", "connect_timeout": "7"}
 
-	dsn := adminDSNFromConfig(t, cfg)
+	dsn := buildAdminDSN(t, cfg)
 	for _, want := range []string{"sslmode=disable", "connect_timeout=7"} {
 		if !strings.Contains(dsn, want) {
 			t.Errorf("dsn %q is missing %q", dsn, want)
@@ -289,7 +299,7 @@ func TestAnEmptyPasswordIsLeftOutOfTheDSN(t *testing.T) {
 	conn := cfg["sql"].(config.M)["connections"].(config.M)["postgres"].(config.M)
 	conn["password"] = ""
 
-	dsn := adminDSNFromConfig(t, cfg)
+	dsn := buildAdminDSN(t, cfg)
 	if strings.Contains(dsn, "password=") {
 		t.Errorf("dsn %q writes an empty password", dsn)
 	}
@@ -305,8 +315,44 @@ func TestANonPostgresConnectionIsRefusedClearly(t *testing.T) {
 	cfg["sql"].(config.M)["connections"].(config.M)["postgres"].(config.M)["driver"] = "mysql"
 
 	probe := &fatalRecorder{}
-	adminDSNFromConfig(probe, cfg)
+	buildAdminDSN(probe, cfg)
 	if !strings.Contains(probe.message, "implemented for postgres only") {
 		t.Errorf("message = %q, want it to name the limitation", probe.message)
+	}
+}
+
+// The administrative connection does not follow the harness's own rewrite.
+//
+// This is the bug the first release shipped with. pointConfigAt writes the
+// scratch database's name into the configuration adminDSNFromConfig reads —
+// and config.Set writes it into the global singleton, which the next test's
+// config.GetAll() then returns. So the second test in a package derived its
+// administrative connection from the first test's scratch database, which had
+// been dropped when that test ended, and every test after the first failed
+// with `database "apptest_…" does not exist`. A single test run alone passed,
+// because nothing had been rewritten yet.
+//
+// The server does not change within a process; only the database name does.
+// So the resolver answers once and keeps answering the same thing.
+func TestTheAdminDSNDoesNotFollowALaterRewrite(t *testing.T) {
+	// Deterministic regardless of which tests ran first, since the resolution
+	// is deliberately process-wide.
+	adminOnce, adminDSN = sync.Once{}, ""
+	t.Cleanup(func() { adminOnce, adminDSN = sync.Once{}, "" })
+
+	cfg := postgresConfig()
+	conn := cfg["sql"].(config.M)["connections"].(config.M)["postgres"].(config.M)
+	original, _ := conn["database"].(string)
+
+	first := adminDSNFromConfig(t, cfg)
+	if !strings.Contains(first, "dbname="+original) {
+		t.Fatalf("first resolution %q does not name %q", first, original)
+	}
+
+	// Exactly what pointConfigAt does once a scratch database exists.
+	conn["database"] = "apptest_0123456789ab"
+
+	if second := adminDSNFromConfig(t, cfg); second != first {
+		t.Errorf("the admin DSN followed the rewrite:\n  first  %q\n  second %q", first, second)
 	}
 }

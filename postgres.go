@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/lemmego/api/config"
 	"github.com/lemmego/migration"
@@ -339,6 +340,33 @@ type testingT interface {
 // host, user, password and port, the config carried options, and a managed
 // URL's sslmode=require reached a server that had no TLS.
 func adminDSNFromConfig(t testingT, cfg config.M) string {
+	t.Helper()
+
+	// Resolved once per process, and that is load-bearing rather than a
+	// cache. pointConfigAt writes the scratch database's name into this same
+	// configuration, so the second test in a package would otherwise derive
+	// its administrative connection from the first test's scratch database —
+	// which was dropped when that test ended. The symptom is every test after
+	// the first failing with `database "apptest_…" does not exist`.
+	//
+	// The server does not change within a process; only the database name
+	// does. So the first resolution is the pristine one and the right one.
+	adminOnce.Do(func() { adminDSN = buildAdminDSN(t, cfg) })
+	if adminDSN == "" {
+		// The first resolution failed and called Fatalf, which stops that
+		// test. A later one gets the same answer rather than a confusing
+		// empty DSN.
+		t.Fatalf("apptest: the database server could not be resolved from the configuration")
+	}
+	return adminDSN
+}
+
+var (
+	adminOnce sync.Once
+	adminDSN  string
+)
+
+func buildAdminDSN(t testingT, cfg config.M) string {
 	t.Helper()
 
 	block, ok := cfg["sql"].(config.M)
