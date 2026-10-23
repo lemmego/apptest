@@ -69,4 +69,13 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
         env:
-          APPTEST_POSTGRES_DSN: "postgres://postgres:postgres@127.0.0.1:5432/lemmego_apptest_test?sslmode=disable"
+          # libpq's own variables, which this package's tests read the way
+          # psql does. There is no apptest-specific variable any more: an
+          # application's configuration is the single source of where its
+          # database is, and these tests stand in for an application.
+          PGHOST: "127.0.0.1"
+          PGPORT: "5432"
+          PGUSER: "postgres"
+          PGPASSWORD: "postgres"
+          PGDATABASE: "lemmego_apptest_test"
+          PGSSLMODE: "disable"

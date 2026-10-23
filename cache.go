@@ -17,7 +17,7 @@ import (
 // around depending on which tests ran first.
 //
 // It rewrites cache.prefix in the configuration and in the package-level
-// config singleton, for the same reason WithPostgres rewrites both: the cache
+// config singleton, for the same reason WithScratchDB rewrites both: the cache
 // provider reads the application's config, but other packages read the
 // global.
 func (a *App) isolateCache(o *options) {

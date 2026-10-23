@@ -14,41 +14,50 @@ import (
 	"github.com/lemmego/migration"
 )
 
-// PostgresDSNEnv names the environment variable holding an administrative
-// Postgres DSN — one that can CREATE DATABASE. Point it at any database on
-// the server; the scratch databases are created beside it.
+// WithScratchDB gives the test its own database, migrated and then dropped.
 //
-//	APPTEST_POSTGRES_DSN="host=localhost user=you dbname=postgres sslmode=disable"
-const PostgresDSNEnv = "APPTEST_POSTGRES_DSN"
-
-// WithPostgres gives the test its own Postgres database, migrated and then
-// dropped.
-//
-// It creates a uniquely named database, rewrites the configuration the
-// application boots with so its connector opens that one, runs every
+// It creates a uniquely named database on the server the application is
+// already configured to use, points the configuration at it, runs every
 // migration registered with migration.GetMigrator, and drops it when the test
 // ends. Tests therefore do not see each other's rows and can run in any
 // order.
 //
-// It skips the test when APPTEST_POSTGRES_DSN is unset, rather than failing.
-// A repository test is worth nothing against a fake, and worth a great deal
-// against the real thing — but it must not make `go test ./...` fail for
-// somebody who has no server running.
+// **The server comes from the application's own configuration**, which under
+// a test binary means .env.test — see api/config. There is no separate
+// environment variable naming a database, and that is the point: two ways to
+// say which server to use is two things that can disagree. The previous
+// APPTEST_POSTGRES_DSN did disagree, in a way worth recording, because it
+// supplied host, user, password and port but not options — so a managed URL's
+// sslmode=require survived into a local test server and every test panicked
+// with "pq: SSL is not enabled on the server". Reading one source cannot
+// produce that.
+//
+// **It fails rather than skipping.** The old behaviour skipped when the
+// variable was unset, reasoning that `go test ./...` should not fail for
+// somebody with no server running. The cost of that kindness was a suite
+// reporting ok in 1.3 seconds having skipped 448 tests and run 7 — a pass
+// indistinguishable from a real one except by the clock. A test that needs a
+// database and has none is not a test that passed.
 //
 // A scratch database per test is deliberately heavier than a transaction
 // rolled back at the end. It is also the only thing that tells the truth
 // about a migration, a trigger, a generated column or a deferred constraint,
 // which is most of what is worth testing at this layer.
-func WithPostgres() Option {
+//
+// Scratch databases are implemented for Postgres only. The name does not say
+// so because the contract is not Postgres-shaped — an application configured
+// for another engine gets a clear failure rather than an option it was never
+// allowed to call.
+func WithScratchDB() Option {
 	return func(o *options) {
 		o.postgres = true
 		o.migrate = true
 	}
 }
 
-// WithPostgresNoMigrate is WithPostgres without running migrations, for a test
-// that wants to exercise the migrator itself.
-func WithPostgresNoMigrate() Option {
+// WithScratchDBNoMigrate is WithScratchDB without running migrations, for a
+// test that wants to exercise the migrator itself.
+func WithScratchDBNoMigrate() Option {
 	return func(o *options) {
 		o.postgres = true
 		o.migrate = false
@@ -63,10 +72,7 @@ type scratchDB struct {
 func (a *App) setUpPostgres(o *options) {
 	a.t.Helper()
 
-	adminDSN := os.Getenv(PostgresDSNEnv)
-	if adminDSN == "" {
-		a.t.Skipf("apptest: set %s to run tests that need a database", PostgresDSNEnv)
-	}
+	adminDSN := adminDSNFromConfig(a.t, o.config)
 
 	scratch, err := createScratch(adminDSN)
 	if err != nil {
@@ -101,11 +107,11 @@ func (a *App) setUpPostgres(o *options) {
 func createScratch(adminDSN string) (*scratchDB, error) {
 	admin, err := sql.Open("postgres", adminDSN)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", PostgresDSNEnv, err)
+		return nil, fmt.Errorf("opening the configured database server: %w", err)
 	}
 	defer admin.Close()
 	if err := admin.Ping(); err != nil {
-		return nil, fmt.Errorf("%s is set but unreachable: %w", PostgresDSNEnv, err)
+		return nil, fmt.Errorf("the configured database server is unreachable: %w", err)
 	}
 
 	name := scratchName()
@@ -187,7 +193,7 @@ func pointConfigAt(t testingT, cfg config.M, adminDSN, name string) {
 
 	block, ok := cfg["sql"].(config.M)
 	if !ok {
-		t.Fatalf("apptest: WithPostgres needs the application's sql config; pass WithConfig(config.GetAll())")
+		t.Fatalf("apptest: WithScratchDB needs the application's sql config; pass WithConfig(config.GetAll())")
 		return
 	}
 	connections, ok := block["connections"].(config.M)
@@ -203,33 +209,21 @@ func pointConfigAt(t testingT, cfg config.M, adminDSN, name string) {
 	}
 	conn, ok := connections[selected].(config.M)
 	if !ok {
-		t.Fatalf("apptest: sql.connections.%s is missing; WithPostgres needs a postgres connection block", selected)
+		t.Fatalf("apptest: sql.connections.%s is missing; WithScratchDB needs a connection block", selected)
 		return
 	}
 	if driver, _ := conn["driver"].(string); driver != migration.DriverPostgres {
-		t.Fatalf("apptest: sql.connections.%s has driver %q; WithPostgres needs the default connection to be postgres", selected, driver)
+		t.Fatalf("apptest: sql.connections.%s has driver %q; scratch databases are implemented for postgres only", selected, driver)
 		return
 	}
 
-	admin := parseDSN(adminDSN)
+	// Only the database name changes. Host, user, password, port and every
+	// option are already the application's own, because that is where the
+	// scratch database was created — so there is nothing to copy across and
+	// nothing that can disagree. The old version rewrote four of those from
+	// an environment DSN and left options alone, which is how a managed URL's
+	// sslmode=require reached a local server.
 	settings := map[string]any{"database": name}
-	if host, ok := admin["host"]; ok {
-		settings["host"] = host
-	}
-	if user, ok := admin["user"]; ok {
-		settings["user"] = user
-	}
-	if password, ok := admin["password"]; ok {
-		settings["password"] = password
-	}
-	// The connectors assert the port to an int, so a string here resolves to
-	// the zero value and the connection quietly goes to the driver's default
-	// port instead of the one the DSN named.
-	if port, ok := admin["port"]; ok {
-		if n, err := strconv.Atoi(port); err == nil {
-			settings["port"] = n
-		}
-	}
 
 	prefix := "sql.connections." + selected + "."
 	for key, value := range settings {
@@ -330,4 +324,91 @@ func sprintf(format string, args ...any) string { return fmt.Sprintf(format, arg
 type testingT interface {
 	Helper()
 	Fatalf(format string, args ...any)
+}
+
+// adminDSNFromConfig builds a DSN for the server the application is
+// configured to use.
+//
+// "Administrative" only in the sense that it must be able to CREATE DATABASE;
+// it is the application's own connection, pointed at the database its config
+// names. The scratch databases are created beside that one.
+//
+// This replaces an environment variable, and the reason is that the
+// application already knows the answer. Asking twice invites the two answers
+// to differ, which is exactly what happened before: the variable carried
+// host, user, password and port, the config carried options, and a managed
+// URL's sslmode=require reached a server that had no TLS.
+func adminDSNFromConfig(t testingT, cfg config.M) string {
+	t.Helper()
+
+	block, ok := cfg["sql"].(config.M)
+	if !ok {
+		t.Fatalf("apptest: WithScratchDB needs the application's sql config; pass WithConfig(config.GetAll())")
+		return ""
+	}
+	selected, _ := block["default"].(string)
+	if selected == "" {
+		t.Fatalf("apptest: sql.default is not set, so there is no server to create a scratch database on")
+		return ""
+	}
+	connections, ok := block["connections"].(config.M)
+	if !ok {
+		t.Fatalf("apptest: sql.connections is missing from the configuration")
+		return ""
+	}
+	conn, ok := connections[selected].(config.M)
+	if !ok {
+		t.Fatalf("apptest: sql.connections.%s is missing", selected)
+		return ""
+	}
+	if driver, _ := conn["driver"].(string); driver != migration.DriverPostgres {
+		t.Fatalf("apptest: sql.connections.%s has driver %q; scratch databases are implemented for postgres only",
+			selected, driver)
+		return ""
+	}
+
+	host, _ := conn["host"].(string)
+	database, _ := conn["database"].(string)
+	if host == "" || database == "" {
+		// Named explicitly rather than left to fail at connect time, because
+		// "dial tcp :5432" tells somebody nothing about which file is wrong.
+		t.Fatalf("apptest: sql.connections.%s needs host and database; under a test binary these come from %s",
+			selected, config.DotEnvTestFile)
+		return ""
+	}
+
+	parts := []string{"host=" + host, "dbname=" + database}
+	if user, _ := conn["user"].(string); user != "" {
+		parts = append(parts, "user="+user)
+	}
+	if password, _ := conn["password"].(string); password != "" {
+		parts = append(parts, "password="+password)
+	}
+	switch port := conn["port"].(type) {
+	case int:
+		if port > 0 {
+			parts = append(parts, "port="+strconv.Itoa(port))
+		}
+	case string:
+		if port != "" {
+			parts = append(parts, "port="+port)
+		}
+	}
+	// Options last, so a connection block that sets sslmode keeps it. This is
+	// the field the environment variable never carried.
+	if options, _ := conn["options"].(config.M); options != nil {
+		for key, value := range options {
+			if text, ok := value.(string); ok && text != "" {
+				parts = append(parts, key+"="+text)
+			}
+		}
+	}
+	if params, _ := conn["params"].(string); params != "" {
+		for _, pair := range strings.Split(params, "&") {
+			if pair != "" {
+				parts = append(parts, strings.ReplaceAll(pair, "=", "="))
+			}
+		}
+	}
+	return strings.Join(parts, " ")
 }

@@ -3,7 +3,7 @@ module github.com/lemmego/apptest
 go 1.27
 
 require (
-	github.com/lemmego/api v0.6.3
+	github.com/lemmego/api v0.8.0
 	github.com/lemmego/auth v0.6.2
 	github.com/lemmego/inertia v0.2.4
 	github.com/lemmego/migration v0.2.0

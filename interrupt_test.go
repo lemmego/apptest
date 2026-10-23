@@ -26,10 +26,8 @@ const readyPrefix = "apptest-interrupt-ready "
 // internals directly would prove only that a drop statement works, which is
 // not the thing that was broken. What was broken is that nothing ran.
 func TestInterruptDropsTheScratchDatabase(t *testing.T) {
-	adminDSN := os.Getenv(PostgresDSNEnv)
-	if adminDSN == "" {
-		t.Skipf("apptest: set %s to run this", PostgresDSNEnv)
-	}
+	skipWithoutPostgres(t)
+	adminDSN := testAdminDSN(t)
 
 	if os.Getenv(interruptChildEnv) == "1" {
 		runInterruptChild(adminDSN)

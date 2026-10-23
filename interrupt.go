@@ -20,7 +20,7 @@ import (
 //
 // So the first test to create a scratch database also installs a handler that
 // drops them. It is installed there rather than in an init(), because a
-// harness used without WithPostgres has no business touching the process's
+// harness used without WithScratchDB has no business touching the process's
 // signal disposition.
 //
 // This covers SIGINT and SIGTERM, which is Ctrl-C and an ordinary kill. It

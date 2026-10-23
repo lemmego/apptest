@@ -27,8 +27,8 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
 github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
-github.com/lemmego/api v0.6.3 h1:BuYtHl7thRBFH22nfklOC1bkROs2B2+g9YC6I+UO3RE=
-github.com/lemmego/api v0.6.3/go.mod h1:w9mZUIwyPGIw6OALqgyuhAbl8Lw7aQjFXOVTZLgFc+U=
+github.com/lemmego/api v0.8.0 h1:oVcTTyRIVWc8+ae+rZJGtbU/IOg1CU2VcsqMNom2vF8=
+github.com/lemmego/api v0.8.0/go.mod h1:k3j9LbIhmOgAQQs1+XHxpXk+dGKYjtWPLmvEJ37Jfa8=
 github.com/lemmego/auth v0.6.2 h1:szCEXLMsZJWGX950TcEdeR4vDcTKo1Qivhg1XXY13Ns=
 github.com/lemmego/auth v0.6.2/go.mod h1:ZMMipLZdSOXKaXLe4BGlA8qpkLF6TFBAjIgnFaUOhow=
 github.com/lemmego/inertia v0.2.4 h1:TpCS+TXt6oyC1OLTGTlnDXR1CmGgAZxIIaRr3oDGwYw=

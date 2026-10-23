@@ -57,7 +57,7 @@ type App struct {
 	strictSSR            bool
 	serverOnce           sync.Once        // guards server, so Server is callable more than once
 	server               *httptest.Server // non-nil once Server has been called
-	scratch              *scratchDB       // non-nil when WithPostgres created a database
+	scratch              *scratchDB       // non-nil when WithScratchDB created a database
 	cachePrefix          string           // the namespace this App's cache entries live under
 }
 

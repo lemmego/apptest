@@ -9,7 +9,7 @@ func TestAProfileIsPublic(t *testing.T) {
         apptest.WithConfig(configs.All()),
         apptest.WithProviders(bootstrap.LoadProviders()...),
         apptest.WithRoutes(bootstrap.LoadRoutes()...),
-        apptest.WithPostgres(),
+        apptest.WithScratchDB(),
     )
 
     a.Get("/@grace").Send().
@@ -48,8 +48,8 @@ go get github.com/lemmego/apptest
 | `WithMiddlewares(...)` | Application middleware |
 | `WithHTTPMiddlewares(...)` | `net/http`-level middleware |
 | `WithErrMap(...)` | So a test sees the statuses and pages the application really returns |
-| `WithPostgres()` | A scratch database, migrated, then dropped |
-| `WithPostgresNoMigrate()` | For testing the migrator itself |
+| `WithScratchDB()` | A scratch database, migrated, then dropped |
+| `WithScratchDBNoMigrate()` | For testing the migrator itself |
 | `WithStrictSSR()` | A failed server-side render becomes a 500 |
 | `WithoutCSRFToken()` | Send unsafe requests with no token, to assert the protection exists |
 | `WithSharedCache()` | Opt out of per-App cache isolation |
@@ -152,22 +152,43 @@ details.
 `JSONValue(path)` returns the raw value for an assertion this package does not
 model.
 
-## A Postgres database per test
+## A database per test
 
-```go
-export APPTEST_POSTGRES_DSN="host=localhost user=you dbname=postgres sslmode=disable"
+`WithScratchDB()` creates a uniquely named database **on the server the
+application is already configured to use**, points the configuration at it,
+runs every migration registered with `migration.GetMigrator`, and drops it
+when the test ends. Tests do not see each other's rows and can run in any
+order.
+
+Under a test binary that configuration comes from `.env.test`, which
+`api/config` loads *instead of* `.env` — so a suite points itself at a test
+database by having the file, not by remembering a variable.
+
+```ini
+# .env.test
+DB_CONNECTION=postgres
+DB_HOST=localhost
+DB_PORT=5432
+DB_USERNAME=you
+DB_DATABASE=postgres
+DB_PARAMS=sslmode=disable
 ```
 
-`WithPostgres()` creates a uniquely named database beside the one in the DSN,
-rewrites the configuration the application boots with so its connector opens
-that one, runs every migration registered with `migration.GetMigrator`, and
-drops it when the test ends. Tests do not see each other's rows and can run in
-any order.
+**There is no apptest-specific environment variable**, and that is deliberate.
+There used to be one, and the trouble with asking twice is that the two
+answers can differ: it supplied host, user, password and port but not options,
+so a managed URL's `sslmode=require` survived into a local server and every
+test died with `pq: SSL is not enabled on the server`. One source cannot
+disagree with itself.
 
-**It skips the test when `APPTEST_POSTGRES_DSN` is unset**, rather than
-failing. A repository test is worth nothing against a fake and a great deal
-against the real thing — but it must not make `go test ./...` fail for
-somebody with no server running.
+**It fails rather than skipping.** The previous version skipped when its
+variable was unset, so that `go test ./...` would not fail for somebody with
+no server running. The price was a suite reporting `ok` in 1.3 seconds having
+skipped 448 tests and run 7 — a pass indistinguishable from a real one except
+by the clock. A test that needs a database and has none has not passed.
+
+Scratch databases are implemented for Postgres only. An application configured
+for another engine is told so, rather than being handed a connection error.
 
 A scratch database per test is deliberately heavier than a transaction rolled
 back at the end. It is also the only thing that tells the truth about a
@@ -194,7 +215,7 @@ the only handler while it waits on a database server nobody can reach is a
 test run that cannot be stopped.
 
 It is installed on first use rather than in an `init()`, so a harness used
-without `WithPostgres` never touches the process's signal disposition.
+without `WithScratchDB` never touches the process's signal disposition.
 
 **SIGKILL and a `-timeout` expiry still leak**, and are worth knowing about
 rather than being surprised by: there is no handler for the first, and on the
