@@ -96,7 +96,7 @@ one `App` serves many requests.
 The id is whatever `UserProvider.GetID` returns — a string, even when the
 column is an integer.
 
-## CSRF and the Inertia version are handled, and neither is a bypass
+## CSRF and the Inertia version
 
 **CSRF.** The harness presents the token on unsafe requests the way a browser
 does. The token is session-backed: the middleware compares what the request
@@ -116,8 +116,8 @@ a request sending none differs from any non-empty version. An application that
 hashes its Vite manifest — the default — would otherwise answer 409 to every
 Inertia request, and the test would be asserting on an empty body.
 
-`InertiaVersion(v)` overrides it, for a test deliberately exercising the
-mismatch.
+Use `InertiaVersion(v)` to override it when the mismatch is what you are
+testing.
 
 ## Assertions
 
@@ -174,12 +174,11 @@ DB_DATABASE=postgres
 DB_PARAMS=sslmode=disable
 ```
 
-**There is no apptest-specific environment variable**, and that is deliberate.
-There used to be one, and the trouble with asking twice is that the two
-answers can differ: it supplied host, user, password and port but not options,
-so a managed URL's `sslmode=require` survived into a local server and every
-test died with `pq: SSL is not enabled on the server`. One source cannot
-disagree with itself.
+**There is no apptest-specific environment variable.** The harness reads the
+same connection your application reads, because two sources can disagree —
+one that supplied host, user, password and port but not options would let a
+managed URL's `sslmode=require` survive into a local server, and every test
+would die with `pq: SSL is not enabled on the server`.
 
 **It fails rather than skipping.** The previous version skipped when its
 variable was unset, so that `go test ./...` would not fail for somebody with
@@ -190,10 +189,10 @@ by the clock. A test that needs a database and has none has not passed.
 Scratch databases are implemented for Postgres only. An application configured
 for another engine is told so, rather than being handed a connection error.
 
-A scratch database per test is deliberately heavier than a transaction rolled
-back at the end. It is also the only thing that tells the truth about a
-migration, a trigger, a generated column or a deferred constraint, which is
-most of what is worth testing at this layer.
+A scratch database per test costs more than a transaction rolled back at the
+end. It is also the only thing that tells you the truth about a migration, a
+trigger, a generated column or a deferred constraint, which is most of what is
+worth testing at this layer.
 
 `Ctx()` is the test's own context for seeding a fixture or asserting against a
 row afterwards. It is cancelled when the test ends, so a query left running by
@@ -223,7 +222,7 @@ second the testing package panics the process itself, sending no signal and
 running no cleanups. A leftover database is always named `apptest_` followed
 by twelve hex digits, and dropping one is `DROP DATABASE "apptest_…"`.
 
-## SSR is lenient by default, and that default is the interesting part
+## SSR behaviour in tests
 
 ```go
 apptest.New(t, …, apptest.WithStrictSSR())
@@ -286,7 +285,7 @@ a.App()      // the booted app.App, to reach into the container
 a.Handler()  // the http.Handler, to drive it directly
 ```
 
-## Deliberate omissions
+## Limitations
 
 No parallel-safe containers, no HTTP recording, no snapshot testing. Model
 factories are the application's own business — a factory that knows your
