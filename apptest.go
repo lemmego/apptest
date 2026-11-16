@@ -77,6 +77,7 @@ type options struct {
 	skipCSRF        bool
 	strictSSR       bool
 	baseURL         string
+	adminDSN        string
 }
 
 // Option configures the application a test boots.

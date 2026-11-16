@@ -83,6 +83,32 @@ func WithScratchDBNoMigrate() Option {
 	}
 }
 
+// WithScratchDBAdmin creates and drops the scratch database over a separate
+// administrative connection, while the application still connects with its
+// own configured credentials.
+//
+// For an application whose database role is deliberately restricted — which
+// is every application that relies on row-level security, because a role
+// that can create databases is usually a superuser and a superuser bypasses
+// every policy. Without this the choice is between a harness that cannot
+// create its scratch database and a suite in which every isolation test
+// passes while proving nothing.
+//
+// The administrative connection does three things and then gets out of the
+// way: it creates the database, it hands the application's role ownership of
+// the database and of its public schema — so migrations run as the
+// application and the tables end up owned by it, which is what makes FORCE
+// ROW LEVEL SECURITY apply to them — and it drops the database at the end.
+// Every statement the test itself makes goes over the application's own
+// connection.
+func WithScratchDBAdmin(dsn string) Option {
+	return func(o *options) {
+		o.postgres = true
+		o.migrate = true
+		o.adminDSN = dsn
+	}
+}
+
 type scratchDB struct {
 	adminDSN string
 	name     string
@@ -91,13 +117,26 @@ type scratchDB struct {
 func (a *App) setUpPostgres(o *options) {
 	a.t.Helper()
 
-	adminDSN := adminDSNFromConfig(a.t, o.config)
+	// The connection that creates and drops. It is the application's own
+	// unless a test supplied a separate one, in which case the application's
+	// role is presumed unable to create a database — which is the normal
+	// state for a role that does not bypass row-level security.
+	adminDSN := o.adminDSN
+	if adminDSN == "" {
+		adminDSN = adminDSNFromConfig(a.t, o.config)
+	}
 
 	scratch, err := createScratch(adminDSN)
 	if err != nil {
 		a.t.Fatalf("apptest: %v", err)
 	}
 	a.scratch = scratch
+
+	if o.adminDSN != "" {
+		if err := handOver(adminDSN, scratch.name, appRole(a.t, o.config)); err != nil {
+			a.t.Fatalf("apptest: %v", err)
+		}
+	}
 
 	// Register the drop the instant the database exists, before anything that
 	// can fail. Everything below — pointing the config at it, running
@@ -110,10 +149,32 @@ func (a *App) setUpPostgres(o *options) {
 	// which is the half t.Cleanup cannot do.
 	a.t.Cleanup(a.tearDownPostgres)
 
-	pointConfigAt(a.t, o.config, adminDSN, scratch.name)
+	// And put it back when the test ends.
+	//
+	// pointConfigAt writes into the process-wide configuration, so without
+	// this the next test in the package boots against a scratch database
+	// that has already been dropped — or, worse, against a surviving one,
+	// where it reads an empty schema and reports a missing row rather than a
+	// configuration that was never restored. That symptom is a test which
+	// passes alone and fails in the package, which is the hardest kind to
+	// attribute.
+	restore := pointConfigAt(a.t, o.config, adminDSN, scratch.name)
+	a.t.Cleanup(restore)
 
 	if o.migrate {
-		a.runMigrations(dsnForDatabase(adminDSN, scratch.name))
+		migrateAs := dsnForDatabase(adminDSN, scratch.name)
+		if o.adminDSN != "" {
+			// As the application, not as the administrator. The role that
+			// runs a migration owns the table it creates, and FORCE ROW
+			// LEVEL SECURITY subjects a table's owner — so migrating as the
+			// administrator would leave every table owned by a role the
+			// policies do not constrain, and the suite would prove nothing.
+			// adminDSNFromConfig builds from the application's OWN config,
+			// so despite its name it is the application's credentials —
+			// which is exactly what is wanted here.
+			migrateAs = dsnForDatabase(adminDSNFromConfig(a.t, o.config), scratch.name)
+		}
+		a.runMigrations(migrateAs)
 	}
 }
 
@@ -207,33 +268,33 @@ func (a *App) tearDownPostgres() {
 // Setting only the application's copy leaves the connector opening whatever
 // the environment said, which under `go test ./internal/...` is nothing at
 // all, since .env is loaded relative to the working directory.
-func pointConfigAt(t testingT, cfg config.M, adminDSN, name string) {
+func pointConfigAt(t testingT, cfg config.M, adminDSN, name string) (restore func()) {
 	t.Helper()
 
 	block, ok := cfg["sql"].(config.M)
 	if !ok {
 		t.Fatalf("apptest: WithScratchDB needs the application's sql config; pass WithConfig(config.GetAll())")
-		return
+		return func() {}
 	}
 	connections, ok := block["connections"].(config.M)
 	if !ok {
 		t.Fatalf("apptest: sql.connections is missing from the configuration")
-		return
+		return func() {}
 	}
 
 	selected, _ := block["default"].(string)
 	if selected == "" {
 		t.Fatalf("apptest: sql.default is not set, so there is no connection to point at the scratch database")
-		return
+		return func() {}
 	}
 	conn, ok := connections[selected].(config.M)
 	if !ok {
 		t.Fatalf("apptest: sql.connections.%s is missing; WithScratchDB needs a connection block", selected)
-		return
+		return func() {}
 	}
 	if driver, _ := conn["driver"].(string); driver != migration.DriverPostgres {
 		t.Fatalf("apptest: sql.connections.%s has driver %q; scratch databases are implemented for postgres only", selected, driver)
-		return
+		return func() {}
 	}
 
 	// Only the database name changes. Host, user, password, port and every
@@ -244,12 +305,26 @@ func pointConfigAt(t testingT, cfg config.M, adminDSN, name string) {
 	// sslmode=require reached a local server.
 	settings := map[string]any{"database": name}
 
+	previous := make(map[string]any, len(settings))
+	for key := range settings {
+		previous[key] = conn[key]
+	}
+	previousDefault, _ := cfg["sql"].(config.M)["default"]
+
 	prefix := "sql.connections." + selected + "."
 	for key, value := range settings {
 		conn[key] = value
 		config.Set(prefix+key, value)
 	}
 	config.Set("sql.default", selected)
+
+	return func() {
+		for key, value := range previous {
+			conn[key] = value
+			config.Set(prefix+key, value)
+		}
+		config.Set("sql.default", previousDefault)
+	}
 }
 
 // dsnForDatabase rewrites dbname in a key=value Postgres DSN.
@@ -457,4 +532,58 @@ func buildAdminDSN(t testingT, cfg config.M) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// appRole reads the role the application connects as.
+//
+// Both spellings are accepted because the configuration tree uses "username"
+// and the DSN builder above reads "user"; a project that sets only one of
+// them would otherwise work for connecting and fail here.
+func appRole(t testingT, cfg config.M) string {
+	t.Helper()
+
+	block, _ := cfg["sql"].(config.M)
+	connections, _ := block["connections"].(config.M)
+	selected, _ := block["default"].(string)
+	conn, _ := connections[selected].(config.M)
+
+	for _, key := range []string{"username", "user"} {
+		if role, _ := conn[key].(string); role != "" {
+			return role
+		}
+	}
+	t.Fatalf("apptest: sql.connections.%s names no role, so there is nobody to hand the scratch database to", selected)
+	return ""
+}
+
+// handOver gives the application's role ownership of the scratch database.
+//
+// Both statements are needed and the second is the one that is easy to miss:
+// since PostgreSQL 15 the public schema is owned by the bootstrap superuser
+// and grants no CREATE to anybody, so a role that owns the database still
+// cannot create a table in it. The symptom is a migration failing with
+// "permission denied for schema public" on a database the role owns.
+func handOver(adminDSN, name, role string) error {
+	admin, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		return fmt.Errorf("administrative connection: %w", err)
+	}
+	defer admin.Close()
+
+	// Identifiers, so they cannot be parameters. Both are ours: the name is
+	// generated here and the role came from the application's own config.
+	if _, err := admin.Exec(`ALTER DATABASE "` + name + `" OWNER TO "` + role + `"`); err != nil {
+		return fmt.Errorf("handing %s to %s: %w", name, role, err)
+	}
+
+	inScratch, err := sql.Open("postgres", dsnForDatabase(adminDSN, name))
+	if err != nil {
+		return fmt.Errorf("connecting to %s: %w", name, err)
+	}
+	defer inScratch.Close()
+
+	if _, err := inScratch.Exec(`ALTER SCHEMA public OWNER TO "` + role + `"`); err != nil {
+		return fmt.Errorf("handing the public schema of %s to %s: %w", name, role, err)
+	}
+	return nil
 }
