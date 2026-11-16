@@ -76,10 +76,14 @@ type options struct {
 	sharedCache     bool
 	skipCSRF        bool
 	strictSSR       bool
+	baseURL         string
 }
 
 // Option configures the application a test boots.
 type Option func(*options)
+
+// baseURL is parsed in New rather than here so a malformed one fails the test
+// with the harness's own message instead of a panic from net/url.
 
 // WithConfig sets the configuration map, as cmd/app/main.go does with
 // config.GetAll(). Without it the application gets only the minimum needed to
@@ -131,6 +135,23 @@ func WithErrMap(m app.ErrMap) Option { return func(o *options) { o.errMap = m } 
 // a renderer actually running.
 func WithStrictSSR() Option { return func(o *options) { o.strictSSR = true } }
 
+// WithBaseURL sets the host every request from this App is sent to.
+//
+// The default is http://apptest.local, which is fine until the application
+// routes on the host — a multi-tenant one resolving a workspace from a
+// subdomain, say — at which point every request arrives at the wrong place
+// and nothing about the failure points here.
+//
+// One App is one host, deliberately. The cookie jar is keyed on this base, so
+// two Apps on two hosts get two independent jars, which is how a browser
+// behaves and how a per-subdomain session actually isolates. Reusing one App
+// and overriding the host per request would share one jar across hosts and
+// quietly prove the opposite of what such a test is usually written to show —
+// see Request.Host, which exists for a narrower job.
+func WithBaseURL(raw string) Option {
+	return func(o *options) { o.baseURL = raw }
+}
+
 // New boots an application and returns it ready to receive requests.
 //
 // It fails the test rather than returning an error: a harness that cannot boot
@@ -154,7 +175,19 @@ func New(t *testing.T, opts ...Option) *App {
 		cfg["app"] = config.M{"name": "apptest", "env": "test", "port": 0}
 	}
 
-	a := &App{t: t, baseURL: &url.URL{Scheme: "http", Host: "apptest.local"}, skipCSRF: o.skipCSRF}
+	base := &url.URL{Scheme: "http", Host: "apptest.local"}
+	if o.baseURL != "" {
+		parsed, err := url.Parse(o.baseURL)
+		if err != nil {
+			t.Fatalf("apptest: WithBaseURL(%q): %v", o.baseURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			t.Fatalf("apptest: WithBaseURL(%q) needs a scheme and a host, such as http://acme.example.test:8083", o.baseURL)
+		}
+		base = &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+	}
+
+	a := &App{t: t, baseURL: base, skipCSRF: o.skipCSRF}
 
 	// Before anything reads a project-relative path.
 	switch {

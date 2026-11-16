@@ -19,10 +19,27 @@ type Request struct {
 	header  http.Header
 	body    io.Reader
 	inertia bool
+	host    string
 }
 
 func (a *App) request(method, path string) *Request {
 	return &Request{app: a, method: method, path: path, header: http.Header{}}
+}
+
+// Host sends this one request to a different host.
+//
+// It is for asserting what the application does with a host, rather than for
+// acting as a user on one: the App's cookie jar is keyed on its own base URL,
+// so a session established elsewhere still travels with a request sent here.
+// That is the opposite of a browser, and a test that used this to show one
+// tenant cannot reach another would prove nothing.
+//
+// Use it for the host-level answers — an unknown subdomain is a 404, a
+// reserved one is refused, the apex serves marketing — and use a second App
+// with WithBaseURL when the test turns on who is signed in.
+func (r *Request) Host(host string) *Request {
+	r.host = host
+	return r
 }
 
 // JSON sets a JSON body and the matching Content-Type.
@@ -118,9 +135,14 @@ func (r *Request) ActingAs(id string) *Request {
 func (r *Request) Send() *Response {
 	r.app.t.Helper()
 
-	target := r.app.baseURL.ResolveReference(&url.URL{Path: r.path})
+	base := r.app.baseURL
+	if r.host != "" {
+		base = &url.URL{Scheme: base.Scheme, Host: r.host}
+	}
+
+	target := base.ResolveReference(&url.URL{Path: r.path})
 	if idx := strings.IndexByte(r.path, '?'); idx >= 0 {
-		target = r.app.baseURL.ResolveReference(&url.URL{
+		target = base.ResolveReference(&url.URL{
 			Path:     r.path[:idx],
 			RawQuery: r.path[idx+1:],
 		})
