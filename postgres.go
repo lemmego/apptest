@@ -13,6 +13,24 @@ import (
 
 	"github.com/lemmego/api/config"
 	"github.com/lemmego/migration"
+
+	// The Postgres driver, registered by this package rather than by the
+	// test that uses it.
+	//
+	// Everywhere else in this monorepo registering a driver is the
+	// application's choice, because the driver name comes from its
+	// configuration — ormconnector and queue both say so in a drivers_test.go.
+	// This package is the exception: it opens "postgres" by name itself, as
+	// the implementation of a scratch-database helper somebody calls as
+	// WithScratchDB. A caller cannot reasonably be expected to blank-import
+	// a driver to make a harness's internals work, and a harness is linked
+	// into test binaries only, so the weight it saves nobody.
+	//
+	// It used to arrive transitively: migration v0.2.0 blank-imported sqlite,
+	// MySQL and Postgres, and v0.6.0 registers none. Without this the helper
+	// reported "no postgres reachable" and every scratch-database test
+	// skipped — green, and testing nothing.
+	_ "github.com/lib/pq"
 )
 
 // WithScratchDB gives the test its own database, migrated and then dropped.
