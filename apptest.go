@@ -71,6 +71,7 @@ type options struct {
 	errMap          app.ErrMap
 	postgres        bool
 	sqlite          bool
+	libsql          bool
 	migrate         bool
 	workingDir      string
 	keepWorkingDir  bool
@@ -214,14 +215,17 @@ func New(t *testing.T, opts ...Option) *App {
 	// configured connection, so asking for both scratch kinds is a mistake in
 	// the test, and silently honouring one of them would point the config at
 	// a database the author did not expect.
-	if o.postgres && o.sqlite {
-		t.Fatalf("apptest: WithScratchDB and WithScratchSQLite are mutually exclusive; an application has one connection")
+	if more := countTrue(o.postgres, o.sqlite, o.libsql); more > 1 {
+		t.Fatalf("apptest: WithScratchDB, WithScratchSQLite and WithScratchLibSQL are mutually exclusive; an application has one connection")
 	}
 	if o.postgres {
 		a.setUpPostgres(o)
 	}
 	if o.sqlite {
 		a.setUpSQLite(o)
+	}
+	if o.libsql {
+		a.setUpLibSQL(o)
 	}
 
 	// The With* methods mutate the engine and return it as a Bootstrapper, so
@@ -310,4 +314,16 @@ func (a *App) Ctx() context.Context {
 		a.ctx = ctx
 	}
 	return a.ctx
+}
+
+// countTrue reports how many of its arguments are set, so the mutually
+// exclusive scratch options can be checked in one place as more are added.
+func countTrue(flags ...bool) int {
+	n := 0
+	for _, flag := range flags {
+		if flag {
+			n++
+		}
+	}
+	return n
 }
