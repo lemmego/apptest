@@ -8,7 +8,7 @@ require (
 	github.com/lemmego/auth v0.6.2
 	github.com/lemmego/cache v0.2.2
 	github.com/lemmego/inertia v0.2.4
-	github.com/lemmego/migration v0.6.0
+	github.com/lemmego/migration v0.8.0
 	github.com/lib/pq v1.10.9
 	github.com/tursodatabase/libsql-client-go v0.0.0-20260528064733-9d5d30a29a60
 )
