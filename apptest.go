@@ -70,6 +70,7 @@ type options struct {
 	httpMiddlewares []app.HTTPMiddleware
 	errMap          app.ErrMap
 	postgres        bool
+	sqlite          bool
 	migrate         bool
 	workingDir      string
 	keepWorkingDir  bool
@@ -209,8 +210,18 @@ func New(t *testing.T, opts ...Option) *App {
 		a.isolateCache(o)
 	}
 
+	// Mutually exclusive rather than last-one-wins: an application has one
+	// configured connection, so asking for both scratch kinds is a mistake in
+	// the test, and silently honouring one of them would point the config at
+	// a database the author did not expect.
+	if o.postgres && o.sqlite {
+		t.Fatalf("apptest: WithScratchDB and WithScratchSQLite are mutually exclusive; an application has one connection")
+	}
 	if o.postgres {
 		a.setUpPostgres(o)
+	}
+	if o.sqlite {
+		a.setUpSQLite(o)
 	}
 
 	// The With* methods mutate the engine and return it as a Bootstrapper, so
